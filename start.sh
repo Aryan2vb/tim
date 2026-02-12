@@ -11,9 +11,9 @@ if ! command -v python3.12 &> /dev/null; then
 fi
 
 # 2. Clean previous attempts
-echo "🧹 Cleaning previous environments..."
-rm -rf .venv
-rm -rf uv.lock
+echo "🧹 Cleaning previous environments (if possible)..."
+rm -rf .venv || true
+rm -rf uv.lock || true
 
 # 3. Create venv manually (bypass uv cache issues)
 echo "📦 Creating virtual environment with Python 3.12..."
@@ -23,7 +23,7 @@ source .venv/bin/activate
 # 4. Install dependencies
 echo "⬇️ Installing dependencies..."
 pip install --upgrade pip
-pip install "pipecat-ai[sarvam,google,silero,runner,daily,webrtc]" "python-dotenv"
+pip install "pipecat-ai[sarvam,google,openai,groq,silero,runner,daily,webrtc]" "python-dotenv"
 
 # 5. Run bot
 echo "✅ Setup complete. Starting bot..."

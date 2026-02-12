@@ -4,13 +4,16 @@
 # With Adaptive Learning System
 #
 
+import json
+import base64
+import random
 import os
 
 from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMRunFrame, TextFrame
+from pipecat.frames.frames import LLMRunFrame, TextFrame, LLMMessagesFrame, AudioRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -23,6 +26,8 @@ from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.sarvam.tts import SarvamTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -87,6 +92,31 @@ class LearningLogger(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+# ---------------------------------------------------------------------------
+# Thinking Processor - Injects "thinking" sounds
+# ---------------------------------------------------------------------------
+class ThinkingProcessor(FrameProcessor):
+    """Injects a random thinking sound before LLM processing."""
+    
+    def __init__(self, thinking_sounds: list[bytes]):
+        super().__init__()
+        self._thinking_sounds = thinking_sounds
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        
+        # Detect end of user turn (LLMMessagesFrame means VAD triggered and user text is aggregated)
+        if isinstance(frame, LLMMessagesFrame):
+            if self._thinking_sounds:
+                # Pick a random sound
+                audio_bytes = random.choice(self._thinking_sounds)
+                # Inject audio frame *before* the LLM frame (so it plays immediately)
+                await self.push_frame(AudioRawFrame(audio=audio_bytes, sample_rate=16000, num_channels=1), direction)
+        
+        # Pass the original frame
+        await self.push_frame(frame, direction)
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     """Configure and run the Pipecat pipeline."""
     logger.info("Starting Aero voice bot")
@@ -104,11 +134,29 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         voice_id="shreya",  # Hindi-speaking female voice
     )
 
-    # --- LLM: Google Gemini 2.0 Flash (fast, multilingual) ---
-    llm = GoogleLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        model="gemini-2.5-flash",
-    )
+    # --- LLM: Choose between Groq, OpenAI, or Google Gemini ---
+    groq_key = os.getenv("GROQ_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    google_key = os.getenv("GOOGLE_API_KEY")
+
+    if groq_key:
+        logger.info("Using Groq (ultra-fast inference) as the LLM")
+        llm = GroqLLMService(
+            api_key=groq_key,
+            model="llama-3.3-70b-versatile",  # Fast, high-quality model
+        )
+    elif openai_key:
+        logger.info("Using OpenAI (ChatGPT) as the LLM")
+        llm = OpenAILLMService(
+            api_key=openai_key,
+            model="gpt-5",
+        )
+    else:
+        logger.info("Using Google Gemini as the LLM")
+        llm = GoogleLLMService(
+            api_key=google_key,
+            model="gemini-2.5-flash",
+        )
 
     # --- Conversation context ---
     messages = [
@@ -125,8 +173,34 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    # --- Create learning logger ---
+    # --- Load thinking sounds ---
+    thinking_audio_bytes = []
+    try:
+        with open("thinking_sounds.json", "r") as f:
+            config = json.load(f)
+            
+            # Helper to decode and add valid sounds
+            def add_sounds(category):
+                for item in config.get(category, []):
+                    b64_str = item.get("audio_base64", "")
+                    if b64_str:
+                        try:
+                            decoded = base64.b64decode(b64_str)
+                            if len(decoded) > 0:
+                                thinking_audio_bytes.append(decoded)
+                        except Exception as e:
+                            logger.warning(f"Failed to decode sound '{item.get('text')}': {e}")
+
+            add_sounds("simple")
+            add_sounds("acknowledgment")
+            
+            logger.info(f"Loaded {len(thinking_audio_bytes)} thinking sounds.")
+    except Exception as e:
+        logger.error(f"Failed to load thinking_sounds.json: {e}")
+
+    # --- Create processors ---
     learning_logger = LearningLogger()
+    thinking_processor = ThinkingProcessor(thinking_audio_bytes)
 
     # --- Build the streaming pipeline ---
     pipeline = Pipeline(
@@ -135,6 +209,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             stt,                     # 📝 Sarvam Saarika: speech → text
             learning_logger,         # 📚 Log for adaptive learning
             user_aggregator,         # 📋 Add user message to LLM context
+            thinking_processor,      # 🤔 Inject "Hmm..." sound
             llm,                     # 🧠 Gemini: think & stream response
             tts,                     # 🔊 Sarvam Bulbul: text → speech
             transport.output(),      # 🔈 Send audio back to browser
