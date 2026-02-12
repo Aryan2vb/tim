@@ -19,3 +19,9 @@ dist/
 
 # Pipecat
 *.onnx
+
+#prompts
+prompts/
+
+#conversations
+conversations/
